@@ -5,6 +5,14 @@ services:
       - "8765:8765"
     environment:
       - PYTHONUNBUFFERED=1
-    command: ["sentinel", "--bind", "0.0.0.0", "--port", "8765", "--no-open"]
+      - PYTHONDONTWRITEBYTECODE=1
+    command: ["sentinel", "--bind", "0.0.0.0", "--port", "8765", "--data-dir", "/runtime_data", "--no-open"]
     volumes:
       - ./runtime_data:/runtime_data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

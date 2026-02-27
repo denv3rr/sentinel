@@ -82,3 +82,47 @@ def test_event_query_filters(tmp_path) -> None:
     r3 = repo.query_events(q3)
     assert len(r3) == 1
     assert r3[0]["id"] == "e3"
+
+
+def test_insert_events_batch_persists_all_rows(tmp_path) -> None:
+    db = Database(tmp_path / "db" / "sentinel.db")
+    repo = StorageRepo(db)
+    repo.upsert_camera({"id": "cam-batch", "name": "Batch", "kind": "webcam", "source": "0", "enabled": True})
+
+    base = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    events = []
+    for i in range(3):
+        when = (base + dt.timedelta(seconds=i)).isoformat()
+        events.append(
+            {
+                "id": f"evt-batch-{i}",
+                "created_at": when,
+                "local_time": when,
+                "monotonic_ns": i + 1,
+                "camera_id": "cam-batch",
+                "event_type": "motion_detection",
+                "label": "person",
+                "confidence": 0.9,
+                "track_id": i,
+                "zone": None,
+                "motion": 0.2,
+                "thumbnail_path": None,
+                "clip_path": None,
+                "reviewed": False,
+                "exported": False,
+                "search_text": "batch person",
+                "metadata": {"idx": i},
+            }
+        )
+
+    repo.insert_events(events)
+    rows = repo.query_events(EventQuery(camera_id="cam-batch", limit=20, sort="asc"))
+    assert [row["id"] for row in rows] == ["evt-batch-0", "evt-batch-1", "evt-batch-2"]
+
+
+def test_insert_events_empty_is_noop(tmp_path) -> None:
+    db = Database(tmp_path / "db" / "sentinel.db")
+    repo = StorageRepo(db)
+    repo.upsert_camera({"id": "cam-empty", "name": "Empty", "kind": "webcam", "source": "1", "enabled": True})
+    repo.insert_events([])
+    assert repo.count_events(EventQuery(camera_id="cam-empty")) == 0

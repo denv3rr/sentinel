@@ -36,8 +36,14 @@ class CameraConfig(BaseModel):
     min_confidence: dict[str, float] = Field(default_factory=lambda: dict(DEFAULT_LABEL_THRESHOLDS))
     cooldown_seconds: int = DEFAULT_EVENT_COOLDOWN_SECONDS
     motion_threshold: float = DEFAULT_MOTION_THRESHOLD
+    inference_max_side: int = 960
     zones: list[ZoneConfig] = Field(default_factory=list)
     secret_ref: dict[str, str] | None = None
+
+    @field_validator("inference_max_side")
+    @classmethod
+    def clamp_inference_max_side(cls, value: int) -> int:
+        return min(4096, max(0, value))
 
 
 class RetentionConfig(BaseModel):

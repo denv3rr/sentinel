@@ -20,6 +20,7 @@ const emptyForm: Omit<CameraConfig, "id"> = {
   min_confidence: { person: 0.35, animal: 0.3, vehicle: 0.35, unknown: 0.45 },
   cooldown_seconds: 8,
   motion_threshold: 0.012,
+  inference_max_side: 960,
   zones: []
 };
 
@@ -177,6 +178,20 @@ export default function CamerasPage({ cameras, onChanged }: Props) {
                 onChange={(e) => setForm({ ...form, motion_threshold: Number(e.target.value) })}
                 className="w-full rounded border border-slate-400/40 bg-transparent px-2 py-1"
               />
+            </label>
+
+            <label>
+              <span className="mb-1 block text-xs opacity-70">Inference max side (px)</span>
+              <input
+                type="number"
+                min={0}
+                max={4096}
+                step={32}
+                value={form.inference_max_side ?? 960}
+                onChange={(e) => setForm({ ...form, inference_max_side: Number(e.target.value) })}
+                className="w-full rounded border border-slate-400/40 bg-transparent px-2 py-1"
+              />
+              <span className="mt-1 block text-[11px] opacity-70">Lower values reduce CPU load. Set to 0 to use full frame.</span>
             </label>
           </div>
           <div className="mt-3">

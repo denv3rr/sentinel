@@ -13,12 +13,13 @@ from cryptography.fernet import Fernet
 RTSP_PASSWORD_RE = re.compile(r"(rtsp://[^:@/]+:)([^@/]+)(@)", re.IGNORECASE)
 PASSWORD_PAIR_RE = re.compile(r"(password\s*[=:]\s*)([^\s,;]+)", re.IGNORECASE)
 TOKEN_RE = re.compile(r"(token\s*[=:]\s*)([^\s,;]+)", re.IGNORECASE)
+CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def sanitize_rtsp_url(url: str) -> str:
     try:
         parts: SplitResult = urlsplit(url)
-        if parts.scheme.lower() != "rtsp":
+        if parts.scheme.lower() not in {"rtsp", "rtsps"}:
             return url
         hostname = parts.hostname or ""
         user = parts.username
@@ -28,6 +29,62 @@ def sanitize_rtsp_url(url: str) -> str:
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
     except Exception:
         return RTSP_PASSWORD_RE.sub(r"\1***\3", url)
+
+
+def resolve_path_within_base(base_dir: Path, untrusted_path: str | Path) -> Path | None:
+    try:
+        resolved_base = base_dir.resolve()
+        target = (resolved_base / Path(untrusted_path)).resolve()
+    except Exception:
+        return None
+
+    try:
+        target.relative_to(resolved_base)
+    except ValueError:
+        return None
+    return target
+
+
+def validate_camera_id(camera_id: str) -> str:
+    value = str(camera_id)
+    if not CAMERA_ID_RE.fullmatch(value):
+        raise ValueError("Invalid camera id")
+    return value
+
+
+def validate_rtsp_url(source: str, *, allow_redacted_password: bool = False) -> str:
+    value = str(source)
+    if not value:
+        raise ValueError("Invalid RTSP source")
+    if any(ch.isspace() for ch in value):
+        raise ValueError("Invalid RTSP source")
+
+    parts: SplitResult = urlsplit(value)
+    if parts.scheme.lower() not in {"rtsp", "rtsps"}:
+        raise ValueError("Invalid RTSP source")
+    if not parts.hostname:
+        raise ValueError("Invalid RTSP source")
+    if parts.fragment:
+        raise ValueError("Invalid RTSP source")
+    if "\\" in parts.path:
+        raise ValueError("Invalid RTSP source")
+
+    try:
+        _ = parts.port
+    except ValueError as exc:
+        raise ValueError("Invalid RTSP source") from exc
+
+    password = parts.password or ""
+    if password == "***" and not allow_redacted_password:
+        raise ValueError("Invalid RTSP source")
+    if any(ch.isspace() for ch in password):
+        raise ValueError("Invalid RTSP source")
+
+    username = parts.username or ""
+    if any(ch.isspace() for ch in username):
+        raise ValueError("Invalid RTSP source")
+
+    return value
 
 
 def redact_secrets(text: str) -> str:

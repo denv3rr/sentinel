@@ -28,7 +28,7 @@ from sentinel.storage.repo import StorageRepo
 from sentinel.storage.retention import RetentionService
 from sentinel.util.logging import get_logger, setup_logging
 from sentinel.util.paths import ensure_data_tree
-from sentinel.util.security import SecretStore
+from sentinel.util.security import SecretStore, resolve_path_within_base
 
 logger = get_logger(__name__)
 
@@ -89,6 +89,7 @@ class SentinelState:
                     "min_confidence": dict(settings_store.settings.label_thresholds),
                     "cooldown_seconds": 8,
                     "motion_threshold": 0.012,
+                    "inference_max_side": 960,
                     "zones": [],
                 }
                 repo.upsert_camera(default_camera)
@@ -218,9 +219,14 @@ def create_app(
 
     @app.get("/api/media/{relative_path:path}")
     def get_media(relative_path: str, request: Request) -> FileResponse:
-        base = Path(request.app.state.sentinel.settings_store.settings.data_dir).resolve()
-        target = (base / relative_path).resolve()
-        if not str(target).startswith(str(base)):
+        settings = request.app.state.sentinel.settings_store.settings
+        base = Path(settings.data_dir).resolve()
+        target = resolve_path_within_base(base, relative_path)
+        if target is None:
+            raise HTTPException(status_code=400, detail="Invalid path")
+        exports_base = Path(settings.export_dir).resolve() if settings.export_dir else (base / "exports").resolve()
+        media_base = (base / "media").resolve()
+        if not (target.is_relative_to(media_base) or target.is_relative_to(exports_base)):
             raise HTTPException(status_code=400, detail="Invalid path")
         if not target.exists() or not target.is_file():
             raise HTTPException(status_code=404, detail="Media not found")
@@ -240,8 +246,8 @@ def create_app(
 
     @app.get("/{full_path:path}", response_model=None)
     def spa(full_path: str):
-        candidate = ui_dir / full_path
-        if candidate.exists() and candidate.is_file():
+        candidate = resolve_path_within_base(ui_dir, full_path)
+        if candidate is not None and candidate.exists() and candidate.is_file():
             return FileResponse(candidate)
         index_path = ui_dir / "index.html"
         if index_path.exists():

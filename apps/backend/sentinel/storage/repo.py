@@ -28,6 +28,13 @@ class EventQuery:
 class StorageRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
+        self._event_insert_sql = """
+            INSERT INTO events (
+                id, created_at, local_time, monotonic_ns, camera_id, event_type, label,
+                confidence, track_id, zone, motion, thumbnail_path, clip_path,
+                reviewed, exported, search_text, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
 
     def upsert_camera(self, camera: dict[str, Any]) -> None:
         now_iso = now_utc_iso()
@@ -70,34 +77,34 @@ class StorageRepo:
         self.db.execute("DELETE FROM cameras WHERE id = ?", (camera_id,))
 
     def insert_event(self, event: dict[str, Any]) -> None:
-        self.db.execute(
-            """
-            INSERT INTO events (
-                id, created_at, local_time, monotonic_ns, camera_id, event_type, label,
-                confidence, track_id, zone, motion, thumbnail_path, clip_path,
-                reviewed, exported, search_text, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event["id"],
-                event["created_at"],
-                event["local_time"],
-                event["monotonic_ns"],
-                event["camera_id"],
-                event.get("event_type", "motion_detection"),
-                event["label"],
-                float(event["confidence"]),
-                event.get("track_id"),
-                event.get("zone"),
-                event.get("motion"),
-                event.get("thumbnail_path"),
-                event.get("clip_path"),
-                int(event.get("reviewed", False)),
-                int(event.get("exported", False)),
-                event.get("search_text", ""),
-                json.dumps(event.get("metadata", {}), ensure_ascii=True),
-            ),
+        self.db.execute(self._event_insert_sql, self._event_params(event))
+
+    def _event_params(self, event: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            event["id"],
+            event["created_at"],
+            event["local_time"],
+            event["monotonic_ns"],
+            event["camera_id"],
+            event.get("event_type", "motion_detection"),
+            event["label"],
+            float(event["confidence"]),
+            event.get("track_id"),
+            event.get("zone"),
+            event.get("motion"),
+            event.get("thumbnail_path"),
+            event.get("clip_path"),
+            int(event.get("reviewed", False)),
+            int(event.get("exported", False)),
+            event.get("search_text", ""),
+            json.dumps(event.get("metadata", {}), ensure_ascii=True),
         )
+
+    def insert_events(self, events: list[dict[str, Any]]) -> None:
+        if not events:
+            return
+        rows = [self._event_params(event) for event in events]
+        self.db.executemany(self._event_insert_sql, rows)
 
     def query_events(self, query: EventQuery) -> list[dict[str, Any]]:
         clauses: list[str] = ["1=1"]

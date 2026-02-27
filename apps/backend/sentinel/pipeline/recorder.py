@@ -7,6 +7,8 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
+from sentinel.util.security import validate_camera_id
+
 
 class MediaRecorder:
     def __init__(self, data_dir: Path, clip_seconds: int = 6) -> None:
@@ -14,10 +16,11 @@ class MediaRecorder:
         self.clip_seconds = max(0, clip_seconds)
 
     def _media_dir_for(self, camera_id: str, event_time_utc: dt.datetime) -> Path:
+        safe_camera_id = validate_camera_id(camera_id)
         media_dir = (
             self.data_dir
             / "media"
-            / camera_id
+            / safe_camera_id
             / event_time_utc.strftime("%Y")
             / event_time_utc.strftime("%m")
             / event_time_utc.strftime("%d")

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from sentinel.camera.onvif import discover_onvif, guess_rtsp_candidates
 from sentinel.camera.opencv_cam import detect_default_webcam_index, discover_webcam_indices
-from sentinel.util.security import sanitize_rtsp_url
+from sentinel.util.security import sanitize_rtsp_url, validate_camera_id, validate_rtsp_url
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -35,6 +35,7 @@ class CameraPayload(BaseModel):
     min_confidence: dict[str, float] = Field(default_factory=dict)
     cooldown_seconds: int = 8
     motion_threshold: float = 0.012
+    inference_max_side: int = Field(default=960, ge=0, le=4096)
     zones: list[dict[str, object]] = Field(default_factory=list)
 
 
@@ -42,6 +43,7 @@ def _sanitized_camera(camera: dict[str, object]) -> dict[str, object]:
     out = dict(camera)
     out.setdefault("detection_enabled", False)
     out.setdefault("recording_mode", "event_only")
+    out.setdefault("inference_max_side", 960)
     source = str(out.get("source", ""))
     if str(out.get("kind", "")) in {"rtsp", "onvif"}:
         out["source"] = sanitize_rtsp_url(source)
@@ -56,21 +58,33 @@ def _to_camera_dict(
 ) -> dict[str, object]:
     state = request.app.state.sentinel
 
-    camera_id = existing_id or payload.id or f"cam-{uuid4().hex[:8]}"
+    try:
+        camera_id = validate_camera_id(existing_id or payload.id or f"cam-{uuid4().hex[:8]}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     camera = payload.model_dump()
     camera["id"] = camera_id
 
     if payload.kind in {"rtsp", "onvif"}:
-        source_has_inline_creds = "@" in payload.source and ":" in payload.source.split("@", 1)[0]
-        if source_has_inline_creds and "***" not in payload.source:
-            secret = state.secret_store.store(f"rtsp:{camera_id}", payload.source)
+        keep_existing_secret = bool(existing and isinstance(existing.get("secret_ref"), dict))
+        try:
+            source_value = validate_rtsp_url(
+                payload.source,
+                allow_redacted_password=keep_existing_secret,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        source_has_inline_creds = "@" in source_value and ":" in source_value.split("@", 1)[0]
+        if source_has_inline_creds and "***" not in source_value:
+            secret = state.secret_store.store(f"rtsp:{camera_id}", source_value)
             camera["secret_ref"] = secret.as_dict()
-            camera["source"] = sanitize_rtsp_url(payload.source)
-        elif existing and isinstance(existing.get("secret_ref"), dict):
+            camera["source"] = sanitize_rtsp_url(source_value)
+        elif keep_existing_secret:
             camera["secret_ref"] = existing["secret_ref"]
-            camera["source"] = sanitize_rtsp_url(payload.source)
+            camera["source"] = sanitize_rtsp_url(source_value)
         else:
-            camera["source"] = sanitize_rtsp_url(payload.source)
+            camera["source"] = sanitize_rtsp_url(source_value)
     else:
         camera["source"] = str(payload.source)
 
@@ -118,6 +132,10 @@ def create_camera(payload: CameraPayload, request: Request) -> dict[str, object]
 @router.put("/{camera_id}")
 def update_camera(camera_id: str, payload: CameraPayload, request: Request) -> dict[str, object]:
     state = request.app.state.sentinel
+    try:
+        camera_id = validate_camera_id(camera_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     existing = state.repo.get_camera(camera_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Camera not found")
@@ -132,6 +150,10 @@ def update_camera(camera_id: str, payload: CameraPayload, request: Request) -> d
 @router.delete("/{camera_id}")
 def delete_camera(camera_id: str, request: Request) -> dict[str, object]:
     state = request.app.state.sentinel
+    try:
+        camera_id = validate_camera_id(camera_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     state.repo.delete_camera(camera_id)
     _sync_after_camera_change(request)
     return {"ok": True, "camera_id": camera_id}
@@ -192,6 +214,10 @@ def detect_default_webcam(max_index: int = 5) -> dict[str, object]:
 @router.get("/{camera_id}/stream.mjpeg")
 def stream_camera(camera_id: str, request: Request) -> StreamingResponse:
     state = request.app.state.sentinel
+    try:
+        camera_id = validate_camera_id(camera_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     headers = {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",

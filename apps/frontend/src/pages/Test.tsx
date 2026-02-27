@@ -26,6 +26,7 @@ function buildDefaultCameraPayload(name: string, source: string): Omit<CameraCon
     min_confidence: { person: 0.35, animal: 0.3, vehicle: 0.35, unknown: 0.45 },
     cooldown_seconds: 8,
     motion_threshold: 0.012,
+    inference_max_side: 960,
     zones: []
   };
 }

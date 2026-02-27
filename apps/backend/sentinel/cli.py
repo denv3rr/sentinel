@@ -91,7 +91,7 @@ def _run(parsed: argparse.Namespace, force_open: bool | None = None) -> int:
         _begin_runtime_shutdown()
         server.should_exit = True
 
-    setattr(app.state, "request_exit", _request_exit_from_api)
+    app.state.request_exit = _request_exit_from_api
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:

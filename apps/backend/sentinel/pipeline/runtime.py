@@ -21,13 +21,21 @@ from sentinel.pipeline.events import EventEngine
 from sentinel.pipeline.recorder import MediaRecorder
 from sentinel.storage.repo import StorageRepo
 from sentinel.util.logging import get_logger
-from sentinel.util.security import SecretStore, sanitize_rtsp_url
+from sentinel.util.security import SecretStore, sanitize_rtsp_url, validate_camera_id
 from sentinel.util.time import monotonic_ns as monotonic_ns_now
 from sentinel.util.time import now_local_iso, now_utc_iso
+from sentinel.vision.detect_base import Detection
 from sentinel.vision.tracker_default import DefaultIoUTracker
 from sentinel.vision.yolo_ultralytics import create_default_detector
 
 logger = get_logger(__name__)
+
+
+def _normalize_webcam_source(value: object) -> str:
+    source = str(value).strip()
+    if source.isdigit():
+        return str(int(source))
+    return source
 
 
 @dataclass
@@ -38,6 +46,10 @@ class WorkerStatus:
     fps: float = 0.0
     frame_drops: int = 0
     reconnects: int = 0
+    inference_ms: float = 0.0
+    encode_ms: float = 0.0
+    persist_ms: float = 0.0
+    persisted_events: int = 0
     last_error: str | None = None
     last_frame_wall_time: str | None = None
     safe_source: str = ""
@@ -56,15 +68,17 @@ class CameraWorker:
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False)
     _status_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _jpeg_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _stream_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _source_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _active_source: CameraSource | None = field(default=None, init=False)
     _status: WorkerStatus = field(init=False)
     _latest_jpeg: bytes | None = field(default=None, init=False)
+    _stream_subscribers: int = field(default=0, init=False)
     _config_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
         source = str(self.camera_cfg.get("source", ""))
-        safe_source = sanitize_rtsp_url(source) if self.camera_cfg.get("kind") != "webcam" else source
+        safe_source = sanitize_rtsp_url(source) if self.camera_cfg.get("kind") != "webcam" else _normalize_webcam_source(source)
         self._status = WorkerStatus(
             camera_id=str(self.camera_cfg["id"]),
             name=str(self.camera_cfg.get("name", self.camera_cfg["id"])),
@@ -122,6 +136,10 @@ class CameraWorker:
                 "fps": round(self._status.fps, 2),
                 "frame_drops": self._status.frame_drops,
                 "reconnects": self._status.reconnects,
+                "inference_ms": round(self._status.inference_ms, 2),
+                "encode_ms": round(self._status.encode_ms, 2),
+                "persist_ms": round(self._status.persist_ms, 2),
+                "persisted_events": self._status.persisted_events,
                 "last_error": self._status.last_error,
                 "last_frame_wall_time": self._status.last_frame_wall_time,
                 "source": self._status.safe_source,
@@ -131,17 +149,38 @@ class CameraWorker:
         with self._jpeg_lock:
             return self._latest_jpeg
 
+    def _register_stream_subscriber(self) -> None:
+        with self._stream_lock:
+            self._stream_subscribers += 1
+
+    def _unregister_stream_subscriber(self) -> None:
+        with self._stream_lock:
+            if self._stream_subscribers > 0:
+                self._stream_subscribers -= 1
+            no_subscribers = self._stream_subscribers == 0
+        if no_subscribers:
+            with self._jpeg_lock:
+                self._latest_jpeg = None
+
+    def _has_stream_subscribers(self) -> bool:
+        with self._stream_lock:
+            return self._stream_subscribers > 0
+
     def stream(self) -> Iterator[bytes]:
         boundary = b"--frame\r\n"
-        while not self._stop_event.is_set():
-            payload = self.latest_jpeg()
-            if payload is None:
-                if self._stop_event.wait(0.1):
+        self._register_stream_subscriber()
+        try:
+            while not self._stop_event.is_set():
+                payload = self.latest_jpeg()
+                if payload is None:
+                    if self._stop_event.wait(0.1):
+                        break
+                    continue
+                yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + payload + b"\r\n"
+                if self._stop_event.wait(0.04):
                     break
-                continue
-            yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + payload + b"\r\n"
-            if self._stop_event.wait(0.04):
-                break
+        finally:
+            self._unregister_stream_subscriber()
 
     def _set_error(self, message: str) -> None:
         with self._status_lock:
@@ -168,6 +207,23 @@ class CameraWorker:
         with self._status_lock:
             self._status.reconnects += 1
 
+    def _update_perf_metrics(
+        self,
+        inference_ms: float | None = None,
+        encode_ms: float | None = None,
+        persist_ms: float | None = None,
+        persisted_events_delta: int = 0,
+    ) -> None:
+        with self._status_lock:
+            if inference_ms is not None:
+                self._status.inference_ms = inference_ms
+            if encode_ms is not None:
+                self._status.encode_ms = encode_ms
+            if persist_ms is not None:
+                self._status.persist_ms = persist_ms
+            if persisted_events_delta:
+                self._status.persisted_events += persisted_events_delta
+
     def _set_active_source(self, source: CameraSource | None) -> None:
         with self._source_lock:
             self._active_source = source
@@ -184,9 +240,10 @@ class CameraWorker:
                     source = resolved
             return RTSPCameraSource(source, name=str(self.camera_cfg.get("name", "RTSP")))
 
-        webcam_source: int | str = source
-        if source.isdigit():
-            webcam_source = int(source)
+        normalized_source = _normalize_webcam_source(source)
+        webcam_source: int | str = normalized_source
+        if normalized_source.isdigit():
+            webcam_source = int(normalized_source)
         return OpenCVCameraSource(webcam_source, name=str(self.camera_cfg.get("name", "Webcam")))
 
     @staticmethod
@@ -200,6 +257,57 @@ class CameraWorker:
         _, mask = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
         motion_ratio = float(np.count_nonzero(mask)) / float(mask.size)
         return gray, motion_ratio
+
+    @staticmethod
+    def _prepare_inference_frame(frame: np.ndarray, max_side: int) -> tuple[np.ndarray, float, float]:
+        if max_side <= 0:
+            return frame, 1.0, 1.0
+
+        frame_height, frame_width = frame.shape[:2]
+        longest_side = max(frame_height, frame_width)
+        if longest_side <= max_side:
+            return frame, 1.0, 1.0
+
+        resize_ratio = float(max_side) / float(longest_side)
+        resized_width = max(1, int(round(frame_width * resize_ratio)))
+        resized_height = max(1, int(round(frame_height * resize_ratio)))
+        resized = cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+        scale_x = float(frame_width) / float(resized_width)
+        scale_y = float(frame_height) / float(resized_height)
+        return resized, scale_x, scale_y
+
+    @staticmethod
+    def _rescale_detections(
+        detections: list[Detection], scale_x: float, scale_y: float, frame_width: int, frame_height: int
+    ) -> list[Detection]:
+        if scale_x == 1.0 and scale_y == 1.0:
+            return detections
+
+        rescaled: list[Detection] = []
+        max_x = max(0, frame_width - 1)
+        max_y = max(0, frame_height - 1)
+
+        for detection in detections:
+            x1, y1, x2, y2 = detection.bbox
+            rx1 = int(round(x1 * scale_x))
+            ry1 = int(round(y1 * scale_y))
+            rx2 = int(round(x2 * scale_x))
+            ry2 = int(round(y2 * scale_y))
+
+            rx1 = max(0, min(max_x, rx1))
+            ry1 = max(0, min(max_y, ry1))
+            rx2 = max(rx1 + 1, min(frame_width, rx2))
+            ry2 = max(ry1 + 1, min(frame_height, ry2))
+
+            rescaled.append(
+                Detection(
+                    bbox=(rx1, ry1, rx2, ry2),
+                    confidence=detection.confidence,
+                    label=detection.label,
+                    raw_label=detection.raw_label,
+                )
+            )
+        return rescaled
 
     @staticmethod
     def _annotate(frame: np.ndarray, tracks: list[Any]) -> np.ndarray:
@@ -224,6 +332,12 @@ class CameraWorker:
         target_interval = 1.0 / max(1.0, target_fps)
         clip_frames_max = int(max(8, target_fps * 6))
         clip_buffer: deque[np.ndarray] = deque(maxlen=clip_frames_max)
+        default_inference_max_side = 960
+        try:
+            inference_max_side = int(self.camera_cfg.get("inference_max_side", default_inference_max_side))
+        except (TypeError, ValueError):
+            inference_max_side = default_inference_max_side
+        inference_max_side = max(0, inference_max_side)
         detector_enabled = bool(self.camera_cfg.get("detection_enabled", False))
         recording_mode = str(self.camera_cfg.get("recording_mode", "event_only")).lower()
         continuous_enabled = recording_mode in {"full", "live"}
@@ -351,14 +465,22 @@ class CameraWorker:
                         motion = 0.0
                         tracked: list[Any] = []
                         emitted: list[dict[str, object]] = []
+                        inference_ms: float | None = None
+                        encode_ms: float | None = None
+                        persist_ms: float | None = None
 
                         if detector_enabled and is_armed:
                             if detector is None:
                                 detector = create_default_detector(model_name=self.model_name)
                             if tracker is None:
                                 tracker = DefaultIoUTracker()
-                            prev_gray, motion = self._motion_score(prev_gray, frame)
-                            detections = detector.detect(frame)
+                            inference_started = time.perf_counter()
+                            inference_frame, scale_x, scale_y = self._prepare_inference_frame(frame, inference_max_side)
+                            prev_gray, motion = self._motion_score(prev_gray, inference_frame)
+                            detections = detector.detect(inference_frame)
+                            if scale_x != 1.0 or scale_y != 1.0:
+                                frame_height, frame_width = frame.shape[:2]
+                                detections = self._rescale_detections(detections, scale_x, scale_y, frame_width, frame_height)
                             tracked = tracker.update(detections)
                             emitted = events.evaluate(
                                 self.camera_cfg,
@@ -368,6 +490,7 @@ class CameraWorker:
                                 packet.local_time_iso,
                                 packet.monotonic_ns,
                             )
+                            inference_ms = (time.perf_counter() - inference_started) * 1000.0
                         else:
                             prev_gray = None
 
@@ -389,7 +512,23 @@ class CameraWorker:
                                 )
                                 event["thumbnail_path"] = thumb_rel
                                 event["clip_path"] = clip_rel
-                                self.repo.insert_event(event)
+                            persist_started = time.perf_counter()
+                            persisted_count = len(emitted)
+                            try:
+                                self.repo.insert_events(emitted)
+                                persist_ms = (time.perf_counter() - persist_started) * 1000.0
+                            except Exception:
+                                logger.exception("failed to batch persist emitted events: %s", camera_id)
+                                for event in emitted:
+                                    try:
+                                        self.repo.insert_event(event)
+                                    except Exception:
+                                        logger.exception("failed to persist emitted event after batch fallback: %s", camera_id)
+                                persist_ms = (time.perf_counter() - persist_started) * 1000.0
+                            self._update_perf_metrics(
+                                persist_ms=persist_ms,
+                                persisted_events_delta=persisted_count,
+                            )
 
                         if continuous_enabled:
                             if continuous_writer is None:
@@ -420,31 +559,34 @@ class CameraWorker:
                                 if (now_perf - continuous_started_perf) >= continuous_segment_seconds:
                                     close_continuous_writer(packet.wall_time_iso)
 
-                        annotated = self._annotate(frame, tracked)
-                        if not is_armed:
-                            cv2.putText(
-                                annotated,
-                                "SYSTEM DISARMED",
-                                (16, 28),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.65,
-                                (0, 215, 255),
-                                2,
-                            )
-                        elif not detector_enabled:
-                            cv2.putText(
-                                annotated,
-                                "DETECTOR OFF",
-                                (16, 28),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.65,
-                                (0, 215, 255),
-                                2,
-                            )
-                        ok, encoded = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                        if ok:
-                            with self._jpeg_lock:
-                                self._latest_jpeg = encoded.tobytes()
+                        if self._has_stream_subscribers():
+                            encode_started = time.perf_counter()
+                            annotated = self._annotate(frame, tracked)
+                            if not is_armed:
+                                cv2.putText(
+                                    annotated,
+                                    "SYSTEM DISARMED",
+                                    (16, 28),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.65,
+                                    (0, 215, 255),
+                                    2,
+                                )
+                            elif not detector_enabled:
+                                cv2.putText(
+                                    annotated,
+                                    "DETECTOR OFF",
+                                    (16, 28),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.65,
+                                    (0, 215, 255),
+                                    2,
+                                )
+                            ok, encoded = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                            if ok:
+                                with self._jpeg_lock:
+                                    self._latest_jpeg = encoded.tobytes()
+                            encode_ms = (time.perf_counter() - encode_started) * 1000.0
 
                         frame_counter += 1
                         elapsed = now_perf - fps_window_start
@@ -453,6 +595,11 @@ class CameraWorker:
                             frame_counter = 0
                             fps_window_start = now_perf
                         self._set_frame_meta(packet.wall_time_iso, current_fps)
+                        self._update_perf_metrics(
+                            inference_ms=inference_ms,
+                            encode_ms=encode_ms,
+                            persist_ms=persist_ms,
+                        )
                     except Exception as exc:
                         close_continuous_writer(None)
                         self._set_error(f"pipeline_error:{type(exc).__name__}")
@@ -516,13 +663,30 @@ class PipelineRuntime:
         for cfg in cameras:
             if not bool(cfg.get("enabled", True)):
                 continue
-            camera_id = str(cfg.get("id", ""))
-            if not camera_id:
+            raw_camera_id = str(cfg.get("id", ""))
+            if not raw_camera_id:
+                continue
+            try:
+                camera_id = validate_camera_id(raw_camera_id)
+            except ValueError:
+                suppressed[raw_camera_id or f"invalid-{len(suppressed)+1}"] = {
+                    "camera_id": raw_camera_id or "",
+                    "name": str(cfg.get("name", raw_camera_id or "invalid")),
+                    "online": False,
+                    "fps": 0.0,
+                    "frame_drops": 0,
+                    "reconnects": 0,
+                    "last_error": "invalid_camera_id",
+                    "last_frame_wall_time": None,
+                    "source": str(cfg.get("source", "")).strip(),
+                }
+                logger.warning("camera suppressed due to invalid camera id: %s", raw_camera_id)
                 continue
 
             kind = str(cfg.get("kind", "webcam")).lower()
             source = str(cfg.get("source", "")).strip()
             if kind == "webcam":
+                source = _normalize_webcam_source(source)
                 owner = webcam_sources_in_use.get(source)
                 if owner is not None:
                     error = f"duplicate_webcam_source:{source} (already used by {owner})"

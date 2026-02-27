@@ -20,6 +20,7 @@ export interface CameraConfig {
   min_confidence: Record<string, number>;
   cooldown_seconds: number;
   motion_threshold: number;
+  inference_max_side?: number;
   zones: Array<{ id: string; name: string; mode: "include" | "ignore" | "line"; points: Array<[number, number]> }>;
 }
 
