@@ -79,6 +79,7 @@ def migrate_settings(raw: dict[str, Any], data_dir: str) -> dict[str, Any]:
             "data_dir": data_dir,
             "export_dir": None,
             "allow_lan": False,
+            "operating_mode": "home",
             "armed": False,
             "telemetry_opt_in": False,
             "onboarding_completed": False,
@@ -96,6 +97,7 @@ def migrate_settings(raw: dict[str, Any], data_dir: str) -> dict[str, Any]:
     raw.setdefault("data_dir", data_dir)
     raw.setdefault("export_dir", None)
     raw.setdefault("allow_lan", False)
+    raw.setdefault("operating_mode", "home")
     raw.setdefault("armed", False)
     raw.setdefault("telemetry_opt_in", False)
     raw.setdefault("onboarding_completed", False)

@@ -1,3 +1,5 @@
+import type { OperatingMode, WebcamDiscoveryItem } from "./types";
+
 const jsonHeaders = { "Content-Type": "application/json" };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -17,6 +19,7 @@ export const api = {
   deleteCamera: (id: string) => request(`/api/cameras/${id}`, { method: "DELETE" }),
   testCamera: (payload: any) => request<{ ok: boolean; message: string }>("/api/cameras/test", { method: "POST", headers: jsonHeaders, body: JSON.stringify(payload) }),
   discoverOnvif: () => request<{ items: any[] }>("/api/cameras/discover/onvif"),
+  discoverWebcams: () => request<{ items: WebcamDiscoveryItem[] }>("/api/cameras/discover/webcams"),
   detectDefaultWebcam: () => request<{ ok: boolean; index: string }>("/api/cameras/default-webcam"),
   getEvents: (params: Record<string, string | number | boolean | undefined>, init?: RequestInit) => {
     const qs = new URLSearchParams();
@@ -39,6 +42,12 @@ export const api = {
   setThresholds: (thresholds: Record<string, number>) => request("/api/settings/thresholds", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ thresholds }) }),
   setLan: (allow_lan: boolean) => request("/api/settings/lan", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ allow_lan }) }),
   setArm: (armed: boolean) => request("/api/settings/arm", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ armed }) }),
+  setOperatingMode: (mode: OperatingMode) =>
+    request<{ ok: boolean; mode: OperatingMode; armed: boolean }>("/api/settings/operating-mode", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ mode })
+    }),
   exitRuntime: () => request<{ ok: boolean; message: string }>("/api/settings/exit", { method: "POST" }),
   health: () => request("/api/health")
 };

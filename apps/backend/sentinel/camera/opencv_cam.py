@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import sys
 import threading
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 import cv2
 
 from sentinel.util.time import monotonic_ns, now_local_iso, now_utc_iso
 
 from .base import CameraSource, FramePacket
+
+WebcamStatus = Literal["online", "offline", "no_signal"]
+
+
+class WebcamDiscoveryItem(TypedDict):
+    index: int
+    status: WebcamStatus
 
 
 class OpenCVCameraSource(CameraSource):
@@ -91,15 +98,25 @@ class OpenCVCameraSource(CameraSource):
 
 
 def detect_default_webcam_index(max_index: int = 5) -> int | None:
-    search_max = max(0, min(max_index, 20))
-    for index in range(search_max + 1):
-        source = OpenCVCameraSource(index, name=f"Probe Webcam {index}")
-        try:
-            if not source.connect():
-                continue
-            frame = source.read_frame()
-            if frame is not None:
-                return index
-        finally:
-            source.close()
+    for item in discover_webcam_indices(max_index=max_index):
+        if item["status"] == "online":
+            return item["index"]
     return None
+
+
+def classify_webcam_index(index: int) -> WebcamStatus:
+    source = OpenCVCameraSource(index, name=f"Probe Webcam {index}")
+    try:
+        if not source.connect():
+            return "offline"
+        frame = source.read_frame()
+        if frame is None:
+            return "no_signal"
+        return "online"
+    finally:
+        source.close()
+
+
+def discover_webcam_indices(max_index: int = 10) -> list[WebcamDiscoveryItem]:
+    search_max = max(0, min(max_index, 20))
+    return [{"index": index, "status": classify_webcam_index(index)} for index in range(search_max + 1)]

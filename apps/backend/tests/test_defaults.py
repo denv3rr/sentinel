@@ -11,4 +11,5 @@ def test_safe_defaults_for_detection_and_recording() -> None:
 
 def test_app_settings_default_disarmed() -> None:
     settings = AppSettings(data_dir="/tmp/sentinel-data")
+    assert settings.operating_mode == "home"
     assert settings.armed is False

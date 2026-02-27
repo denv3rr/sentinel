@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from sentinel.camera.onvif import discover_onvif, guess_rtsp_candidates
-from sentinel.camera.opencv_cam import detect_default_webcam_index
+from sentinel.camera.opencv_cam import detect_default_webcam_index, discover_webcam_indices
 from sentinel.util.security import sanitize_rtsp_url
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
@@ -158,6 +158,22 @@ def discover_onvif_cameras() -> dict[str, object]:
                 "rtsp_candidates": guess_rtsp_candidates(endpoint.host),
             }
         )
+    return {"items": items}
+
+
+@router.get("/discover/webcams")
+def discover_webcams(max_index: int = 10) -> dict[str, object]:
+    discovered = discover_webcam_indices(max_index=max_index)
+    default_index = next((item["index"] for item in discovered if item["status"] == "online"), None)
+    items = [
+        {
+            "index": item["index"],
+            "label": f"Webcam {item['index']}",
+            "status": item["status"],
+            "is_default": item["index"] == default_index,
+        }
+        for item in discovered
+    ]
     return {"items": items}
 
 

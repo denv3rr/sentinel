@@ -57,6 +57,7 @@ class AppSettings(BaseModel):
     bind: str = DEFAULT_BIND
     port: int = DEFAULT_PORT
     allow_lan: bool = False
+    operating_mode: Literal["home", "away", "night"] = "home"
     armed: bool = False
     telemetry_opt_in: bool = False
     onboarding_completed: bool = False

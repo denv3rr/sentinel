@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -33,6 +34,10 @@ class ArmPayload(BaseModel):
     armed: bool
 
 
+class OperatingModePayload(BaseModel):
+    mode: Literal["home", "away", "night"]
+
+
 class RuntimeExitResponse(BaseModel):
     ok: bool
     message: str
@@ -51,6 +56,10 @@ def _pick_native_directory() -> str | None:
         return selected or None
     except Exception:
         return None
+
+
+def _armed_for_mode(mode: Literal["home", "away", "night"]) -> bool:
+    return mode in {"away", "night"}
 
 
 @router.get("")
@@ -138,6 +147,16 @@ def set_lan(payload: LanPayload, request: Request) -> dict[str, object]:
         "allow_lan": payload.allow_lan,
         "note": "Runtime bind host is controlled by CLI flags; restart with --bind 0.0.0.0 to expose on LAN.",
     }
+
+
+@router.post("/operating-mode")
+def set_operating_mode(payload: OperatingModePayload, request: Request) -> dict[str, object]:
+    state = request.app.state.sentinel
+    armed = _armed_for_mode(payload.mode)
+    state.settings_store.update(operating_mode=payload.mode, armed=armed)
+    state.repo.append_settings_history("operating_mode", {"mode": payload.mode, "armed": armed})
+    state.runtime.global_armed = armed
+    return {"ok": True, "mode": payload.mode, "armed": armed}
 
 
 @router.post("/arm")

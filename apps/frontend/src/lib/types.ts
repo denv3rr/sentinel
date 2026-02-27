@@ -1,4 +1,12 @@
 export type CameraKind = "webcam" | "rtsp" | "onvif";
+export type OperatingMode = "home" | "away" | "night";
+
+export interface WebcamDiscoveryItem {
+  index: string | number;
+  label: string;
+  status: "online" | "offline" | "busy" | "unavailable" | "error" | "unknown" | string;
+  is_default: boolean;
+}
 
 export interface CameraConfig {
   id: string;
@@ -46,6 +54,7 @@ export interface SettingsResponse {
     port: number;
     allow_lan: boolean;
     armed: boolean;
+    operating_mode: OperatingMode;
     telemetry_opt_in: boolean;
     onboarding_completed: boolean;
     retention: { days: number; max_gb: number | null };

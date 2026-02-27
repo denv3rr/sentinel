@@ -74,13 +74,21 @@ export default function App() {
   }, [settingsResponse?.settings.data_dir]);
 
   const firstRun = useMemo(() => Boolean(settingsResponse?.first_run), [settingsResponse]);
+  const operatingMode = settingsResponse?.settings.operating_mode;
 
   return (
     <div className="min-h-screen pb-10">
       <header className="mx-auto flex w-full max-w-[1400px] flex-wrap items-center justify-between gap-2 px-4 py-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-wide">Sentinel</h1>
-          <p className="text-xs opacity-70">Local-first security recognition</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-xl font-semibold tracking-wide">Sentinel</h1>
+            {operatingMode ? (
+              <span className="rounded border border-teal-500/40 bg-teal-500/10 px-2 py-0.5 text-[11px] uppercase tracking-wide text-teal-300">
+                Mode: {operatingMode}
+              </span>
+            ) : null}
+          </div>
+          <p className="text-xs opacity-70">Local-first security recognition with guided defaults for home use</p>
         </div>
 
         <nav className="flex flex-wrap gap-2" aria-label="Primary navigation">
@@ -224,12 +232,13 @@ export default function App() {
           <>
             {page === "monitor" ? (
               <>
-                <Dashboard cameras={cameras} statuses={statuses} />
+                <Dashboard cameras={cameras} statuses={statuses} operatingMode={settingsResponse.settings.operating_mode} />
                 <TestPage
                   cameras={cameras}
                   statuses={statuses}
                   onChanged={loadAll}
                   armed={Boolean(settingsResponse.settings.armed)}
+                  operatingMode={settingsResponse.settings.operating_mode}
                 />
               </>
             ) : null}

@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../lib/api";
 import { formatTimestamp, relativeTime } from "../lib/time";
-import type { CameraConfig, EventItem } from "../lib/types";
+import type { CameraConfig, EventItem, OperatingMode, WebcamDiscoveryItem } from "../lib/types";
 
 interface Props {
   cameras: CameraConfig[];
   statuses: Record<string, { online?: boolean; fps?: number; last_error?: string }>;
   onChanged: () => Promise<void>;
   armed: boolean;
+  operatingMode: OperatingMode;
 }
 
 type RuntimeStatus = { online?: boolean; fps?: number; last_error?: string };
@@ -47,9 +48,12 @@ function choosePreferredCamera(cameras: CameraConfig[], statuses: Record<string,
   return cameras.find((camera) => camera.kind === "webcam") ?? cameras[0];
 }
 
-export default function TestPage({ cameras, statuses, onChanged, armed }: Props) {
+export default function TestPage({ cameras, statuses, onChanged, armed, operatingMode }: Props) {
   const [cameraId, setCameraId] = useState("");
   const [manualSelection, setManualSelection] = useState(false);
+  const [detectedInputs, setDetectedInputs] = useState<WebcamDiscoveryItem[]>([]);
+  const [detectedSource, setDetectedSource] = useState("");
+  const [detectingInputs, setDetectingInputs] = useState(false);
   const [note, setNote] = useState("Preparing test monitor...");
   const [error, setError] = useState("");
   const [events, setEvents] = useState<EventItem[]>([]);
@@ -58,6 +62,60 @@ export default function TestPage({ cameras, statuses, onChanged, armed }: Props)
 
   const selectedCamera = useMemo(() => cameras.find((c) => c.id === cameraId), [cameras, cameraId]);
   const status = selectedCamera ? statuses[selectedCamera.id] : undefined;
+
+  async function refreshDetectedInputs(selectPreferred: boolean = false): Promise<void> {
+    if (detectingInputs) return;
+    setDetectingInputs(true);
+    try {
+      const response = (await api.discoverWebcams()) as { items?: WebcamDiscoveryItem[] };
+      const inputs = response.items ?? [];
+      setDetectedInputs(inputs);
+      if (selectPreferred) {
+        const preferred = inputs.find((item) => item.is_default) ?? inputs.find((item) => item.status === "online") ?? inputs[0];
+        if (preferred) {
+          setDetectedSource(String(preferred.index));
+        }
+      }
+    } catch (e) {
+      setError((e as Error).message || "Failed to detect local inputs");
+    } finally {
+      setDetectingInputs(false);
+    }
+  }
+
+  async function selectDetectedInput(nextSource: string): Promise<void> {
+    setDetectedSource(nextSource);
+    if (!nextSource) return;
+    setError("");
+
+    const existing = cameras.find((camera) => camera.kind === "webcam" && camera.source === nextSource);
+    if (existing) {
+      if (!existing.enabled) {
+        const updated = { ...existing, enabled: true };
+        const result = (await api.updateCamera(existing.id, updated)) as { camera?: CameraConfig };
+        setManualSelection(true);
+        setCameraId((result.camera ?? updated).id);
+        await onChanged();
+      } else {
+        setManualSelection(true);
+        setCameraId(existing.id);
+      }
+      setNote(`Switched to detected input "${existing.name}".`);
+      return;
+    }
+
+    try {
+      setNote(`Adding detected input ${nextSource}...`);
+      const payload = buildDefaultCameraPayload(`Webcam ${nextSource}`, nextSource);
+      const created = (await api.createCamera(payload)) as { camera: CameraConfig };
+      setManualSelection(true);
+      setCameraId(created.camera.id);
+      await onChanged();
+      setNote(`Detected input ${nextSource} was added and selected.`);
+    } catch (e) {
+      setError((e as Error).message || "Failed to add detected input");
+    }
+  }
 
   async function bootstrapQuickTest(): Promise<void> {
     if (busy) return;
@@ -106,6 +164,7 @@ export default function TestPage({ cameras, statuses, onChanged, armed }: Props)
       if (activeCamera) {
         setManualSelection(false);
         setCameraId(activeCamera.id);
+        setDetectedSource(webcamIndex);
       }
 
       if (!armed) {
@@ -181,6 +240,34 @@ export default function TestPage({ cameras, statuses, onChanged, armed }: Props)
   }, [cameraId, manualSelection, cameras, statuses]);
 
   useEffect(() => {
+    let active = true;
+    async function loadDetectedInputs(): Promise<void> {
+      setDetectingInputs(true);
+      try {
+        const response = (await api.discoverWebcams()) as { items?: WebcamDiscoveryItem[] };
+        if (!active) return;
+        const inputs = response.items ?? [];
+        setDetectedInputs(inputs);
+        const preferred = inputs.find((item) => item.is_default) ?? inputs.find((item) => item.status === "online") ?? inputs[0];
+        if (preferred) {
+          setDetectedSource(String(preferred.index));
+        }
+      } catch (e) {
+        if (!active) return;
+        setError((e as Error).message || "Failed to detect local inputs");
+      } finally {
+        if (active) {
+          setDetectingInputs(false);
+        }
+      }
+    }
+    void loadDetectedInputs();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!cameraId) return;
     void loadEvents(cameraId);
     const timer = window.setInterval(() => {
@@ -228,6 +315,31 @@ export default function TestPage({ cameras, statuses, onChanged, armed }: Props)
                 })}
               </select>
             </label>
+            <label className="flex items-center gap-2 text-xs">
+              <span className="opacity-70">Detected input</span>
+              <select
+                value={detectedSource}
+                onChange={(e) => {
+                  void selectDetectedInput(e.target.value);
+                }}
+                className="min-w-[220px] rounded border border-slate-400/40 bg-transparent px-2 py-1"
+                disabled={detectingInputs}
+              >
+                <option value="">{detectingInputs ? "Detecting..." : "Select detected input..."}</option>
+                {detectedInputs.map((input) => (
+                  <option key={`${input.index}-${input.label}`} value={String(input.index)}>
+                    {input.label} ({input.status}){input.is_default ? " - default" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="rounded border border-slate-400/40 px-3 py-1 text-xs hover:bg-slate-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void refreshDetectedInputs()}
+              disabled={detectingInputs}
+            >
+              {detectingInputs ? "Detecting..." : "Detect inputs"}
+            </button>
             <button
               className="rounded border border-slate-400/40 px-3 py-1 text-xs hover:bg-slate-500/10"
               onClick={() => void bootstrapQuickTest()}
@@ -279,10 +391,14 @@ export default function TestPage({ cameras, statuses, onChanged, armed }: Props)
           </div>
         </div>
 
-        <div className="mt-3 grid grid-cols-1 gap-2 text-xs md:grid-cols-4">
+        <div className="mt-3 grid grid-cols-1 gap-2 text-xs md:grid-cols-5">
           <div className="rounded border border-slate-400/30 p-2">
             <p className="opacity-70">Armed</p>
             <p className={`font-semibold ${armed ? "text-emerald-400" : "text-amber-300"}`}>{armed ? "Yes" : "No"}</p>
+          </div>
+          <div className="rounded border border-slate-400/30 p-2">
+            <p className="opacity-70">Mode</p>
+            <p className="font-semibold uppercase">{operatingMode}</p>
           </div>
           <div className="rounded border border-slate-400/30 p-2">
             <p className="opacity-70">Camera</p>
