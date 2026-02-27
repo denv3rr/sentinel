@@ -1,0 +1,45 @@
+# Runtime data
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.log
+logs/
+media/
+exports/
+data/
+.tmp*/
+tmp/
+temp/
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node/frontend
+apps/frontend/node_modules/
+apps/frontend/dist/
+*.tsbuildinfo
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Internal planning (intentionally untracked)
+/agents/
+*.research.*
+*_notes.*
+*_plan.*

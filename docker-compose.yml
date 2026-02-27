@@ -1,0 +1,10 @@
+services:
+  sentinel:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["sentinel", "--bind", "0.0.0.0", "--port", "8765", "--no-open"]
+    volumes:
+      - ./runtime_data:/runtime_data

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentinel"
+version = "0.1.0"
+description = "Local-first cross-platform security recognition app for webcams, RTSP, and ONVIF sources."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Sentinel Maintainers" }]
+keywords = ["security", "opencv", "fastapi", "video", "detection", "local-first"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "fastapi>=0.115.0,<1",
+  "uvicorn[standard]>=0.30.0,<1",
+  "numpy>=1.26.0,<3",
+  "opencv-python>=4.10.0,<5",
+  "pydantic>=2.7.0,<3",
+  "python-multipart>=0.0.9,<1",
+  "keyring>=24.3.0,<26",
+  "cryptography>=42.0.0,<44",
+  "ultralytics>=8.2.0,<9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0,<9",
+  "ruff>=0.6.0,<1",
+  "mypy>=1.11.0,<2",
+  "types-setuptools>=75.0.0.20240820",
+]
+
+[project.scripts]
+sentinel = "sentinel.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "apps/backend"}
+
+[tool.setuptools.packages.find]
+where = ["apps/backend"]
+include = ["sentinel*"]
+
+[tool.setuptools.package-data]
+sentinel = ["web/*", "web/assets/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["apps/backend"]
+testpaths = ["apps/backend/tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "I001", "UP017", "UP037", "UP041"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+namespace_packages = true
+mypy_path = ["apps/backend"]
+ignore_missing_imports = true
+disable_error_code = ["no-any-return", "arg-type", "call-overload", "attr-defined"]

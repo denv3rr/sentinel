@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f4f5f7;
+  --bg-strong: #ffffff;
+  --text: #10131a;
+  --muted: #5f6b7a;
+  --accent: #0ea5a3;
+  --border: #d8dee8;
+}
+
+[data-theme="dark"] {
+  --bg: #0f172a;
+  --bg-strong: #111827;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --accent: #14b8a6;
+  --border: #334155;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI Variable", "Avenir Next", "Trebuchet MS", sans-serif;
+  background: radial-gradient(circle at 10% 0%, color-mix(in srgb, var(--accent), var(--bg) 88%), var(--bg));
+  color: var(--text);
+}
+
+.card {
+  background: var(--bg-strong);
+  border: 1px solid var(--border);
+}
