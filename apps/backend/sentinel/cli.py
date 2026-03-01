@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, is_dataclass
+import json
 import signal
 import sys
 import threading
@@ -8,7 +10,10 @@ import webbrowser
 
 import uvicorn
 
+from sentinel.ml.runners import run_benchmark, run_eval, run_export, run_train
 from sentinel.main import create_app
+
+_KNOWN_COMMANDS = {"serve", "train", "eval", "export", "benchmark"}
 
 
 def _url_for_browser(bind: str, port: int) -> str:
@@ -17,12 +22,69 @@ def _url_for_browser(bind: str, port: int) -> str:
 
 
 def _build_parser(prog: str) -> argparse.ArgumentParser:
+    """Legacy parser (no explicit command), kept for backward compatibility."""
     parser = argparse.ArgumentParser(prog=prog, description="Sentinel local-first security recognition app")
     parser.add_argument("--data-dir", default=None, help="Path for runtime data (SQLite/media/logs/exports)")
     parser.add_argument("--bind", default="127.0.0.1", help="Bind host (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="Bind port (default 8765)")
     parser.add_argument("--no-open", action="store_true", help="Do not auto-open browser")
     parser.add_argument("--log-level", default="info", help="Uvicorn log level")
+    return parser
+
+
+def _build_command_parser(prog: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog, description="Sentinel local-first security recognition app")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    serve = subparsers.add_parser("serve", help="Run Sentinel API + UI server")
+    serve.add_argument("--data-dir", default=None, help="Path for runtime data (SQLite/media/logs/exports)")
+    serve.add_argument("--bind", default="127.0.0.1", help="Bind host (default 127.0.0.1)")
+    serve.add_argument("--port", type=int, default=8765, help="Bind port (default 8765)")
+    serve.add_argument("--no-open", action="store_true", help="Do not auto-open browser")
+    serve.add_argument("--log-level", default="info", help="Uvicorn log level")
+
+    train = subparsers.add_parser("train", help="Train a detector model and emit a manifest")
+    train.add_argument("--dataset-config", required=True, help="Path to dataset YAML/JSON config")
+    train.add_argument("--model", default="yolov8n.pt", help="Base model or checkpoint path")
+    train.add_argument("--output-dir", default="artifacts/ml/train", help="Training output directory")
+    train.add_argument("--alias", default=None, help="Optional registry alias for manifest")
+    train.add_argument("--profile", default="balanced", help="Detector profile metadata")
+    train.add_argument("--image-size", type=int, default=960, help="Training image size")
+    train.add_argument("--epochs", type=int, default=10, help="Training epochs")
+    train.add_argument("--batch-size", type=int, default=8, help="Training batch size")
+    train.add_argument("--confidence", type=float, default=0.25, help="Default confidence threshold")
+    train.add_argument("--seed", type=int, default=7, help="Reproducibility seed")
+    train.add_argument("--deterministic", action="store_true", help="Enable deterministic flags where possible")
+    train.add_argument("--registry-path", default="artifacts/ml/registry.json", help="Model registry JSON path")
+    train.add_argument("--dry-run", action="store_true", help="Run pipeline without invoking training backend")
+
+    evaluate = subparsers.add_parser("eval", help="Evaluate a registered manifest model")
+    evaluate.add_argument("--model", required=True, help="Model alias or manifest path")
+    evaluate.add_argument("--dataset-config", required=True, help="Path to dataset YAML/JSON config")
+    evaluate.add_argument("--output-dir", default="artifacts/ml/eval", help="Evaluation output directory")
+    evaluate.add_argument("--image-size", type=int, default=None, help="Override eval image size")
+    evaluate.add_argument("--seed", type=int, default=7, help="Reproducibility seed")
+    evaluate.add_argument("--deterministic", action="store_true", help="Enable deterministic flags where possible")
+    evaluate.add_argument("--registry-path", default="artifacts/ml/registry.json", help="Model registry JSON path")
+    evaluate.add_argument("--dry-run", action="store_true", help="Run pipeline without invoking eval backend")
+
+    export = subparsers.add_parser("export", help="Export a registered manifest model")
+    export.add_argument("--model", required=True, help="Model alias or manifest path")
+    export.add_argument("--output-dir", default="artifacts/ml/export", help="Export output directory")
+    export.add_argument("--format", dest="export_format", default="onnx", help="Export format (onnx, torchscript...)")
+    export.add_argument("--image-size", type=int, default=None, help="Override export image size")
+    export.add_argument("--optimize", action="store_true", help="Enable export optimization flags")
+    export.add_argument("--registry-path", default="artifacts/ml/registry.json", help="Model registry JSON path")
+    export.add_argument("--dry-run", action="store_true", help="Run pipeline without invoking export backend")
+
+    benchmark = subparsers.add_parser("benchmark", help="Run detector micro-benchmarks")
+    benchmark.add_argument("--model", default="yolov8n.pt", help="Model path")
+    benchmark.add_argument("--profile", default="balanced", help="Detector profile")
+    benchmark.add_argument("--confidence", type=float, default=0.25, help="Detector confidence")
+    benchmark.add_argument("--frames", type=int, default=120, help="Benchmark frames")
+    benchmark.add_argument("--width", type=int, default=640, help="Synthetic frame width")
+    benchmark.add_argument("--height", type=int, default=360, help="Synthetic frame height")
+
     return parser
 
 
@@ -130,13 +192,89 @@ def _run(parsed: argparse.Namespace, force_open: bool | None = None) -> int:
     return 1
 
 
+def _print_result(result: object) -> None:
+    if is_dataclass(result):
+        payload = asdict(result)
+    else:
+        payload = result
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _dispatch_command(parsed: argparse.Namespace) -> int:
+    if parsed.command == "serve":
+        return _run(parsed)
+    if parsed.command == "train":
+        result = run_train(
+            dataset_config_path=parsed.dataset_config,
+            model_name=parsed.model,
+            output_dir=parsed.output_dir,
+            alias=parsed.alias,
+            profile=parsed.profile,
+            image_size=parsed.image_size,
+            epochs=parsed.epochs,
+            batch_size=parsed.batch_size,
+            confidence=parsed.confidence,
+            seed=parsed.seed,
+            deterministic=parsed.deterministic,
+            registry_path=parsed.registry_path,
+            dry_run=parsed.dry_run,
+        )
+        _print_result(result)
+        return 0
+    if parsed.command == "eval":
+        result = run_eval(
+            model=parsed.model,
+            dataset_config_path=parsed.dataset_config,
+            output_dir=parsed.output_dir,
+            image_size=parsed.image_size,
+            seed=parsed.seed,
+            deterministic=parsed.deterministic,
+            registry_path=parsed.registry_path,
+            dry_run=parsed.dry_run,
+        )
+        _print_result(result)
+        return 0
+    if parsed.command == "export":
+        result = run_export(
+            model=parsed.model,
+            output_dir=parsed.output_dir,
+            export_format=parsed.export_format,
+            image_size=parsed.image_size,
+            optimize=parsed.optimize,
+            registry_path=parsed.registry_path,
+            dry_run=parsed.dry_run,
+        )
+        _print_result(result)
+        return 0
+    if parsed.command == "benchmark":
+        result = run_benchmark(
+            model_name=parsed.model,
+            profile=parsed.profile,
+            confidence=parsed.confidence,
+            frames=parsed.frames,
+            frame_width=parsed.width,
+            frame_height=parsed.height,
+        )
+        _print_result(result)
+        return 0
+    raise ValueError(f"Unknown command: {parsed.command}")
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser("sentinel")
-    parsed = parser.parse_args(argv)
+    args = list(argv or [])
     try:
+        if args and args[0] in _KNOWN_COMMANDS:
+            parser = _build_command_parser("sentinel")
+            parsed = parser.parse_args(args)
+            return _dispatch_command(parsed)
+        parser = _build_parser("sentinel")
+        parsed = parser.parse_args(args)
         return _run(parsed)
     except KeyboardInterrupt:
         return 0
+    except Exception as exc:
+        print(f"[error] {exc}")
+        return 2
 
 
 if __name__ == "__main__":

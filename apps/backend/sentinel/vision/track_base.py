@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from .detect_base import Detection
+from .detect_base import Detection, DetectionChild
 
 
 @dataclass
@@ -13,6 +13,7 @@ class TrackedObject:
     confidence: float
     label: str
     raw_label: str | None = None
+    children: list[DetectionChild] = field(default_factory=list)
 
 
 class Tracker(ABC):

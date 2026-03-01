@@ -18,6 +18,7 @@ class ExportPayload(BaseModel):
     label: str | None = None
     min_confidence: float | None = None
     zone: str | None = None
+    child_label: str | None = None
     reviewed: bool | None = None
     exported: bool | None = None
     search: str | None = None
@@ -33,6 +34,7 @@ def export_events(payload: ExportPayload, request: Request) -> dict[str, object]
         label=payload.label,
         min_confidence=payload.min_confidence,
         zone=payload.zone,
+        child_label=payload.child_label,
         reviewed=payload.reviewed,
         exported=payload.exported,
         search=payload.search,

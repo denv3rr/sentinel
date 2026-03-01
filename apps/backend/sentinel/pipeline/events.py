@@ -67,6 +67,17 @@ class EventEngine:
             self._last_event_ns[dedupe_key] = monotonic_ns
 
             raw_label = track.raw_label or track.label
+            children_payload = [
+                {
+                    "child_id": child.child_id,
+                    "bbox": list(child.bbox),
+                    "label": child.label,
+                    "raw_label": child.raw_label or child.label,
+                    "confidence": round(float(child.confidence), 4),
+                }
+                for child in track.children
+            ]
+            child_labels = " ".join(sorted({str(item["label"]) for item in children_payload}))
             events.append(
                 {
                     "id": f"evt-{uuid4().hex}",
@@ -82,11 +93,12 @@ class EventEngine:
                     "motion": round(float(motion_score), 6),
                     "reviewed": False,
                     "exported": False,
-                    "search_text": f"{camera_cfg.get('name', camera_id)} {track.label} {raw_label} {include_zone}".strip(),
+                    "search_text": f"{camera_cfg.get('name', camera_id)} {track.label} {raw_label} {include_zone} {child_labels}".strip(),
                     "metadata": {
                         "bbox": list(track.bbox),
                         "raw_label": raw_label,
                         "threshold": threshold,
+                        "children": children_payload,
                     },
                 }
             )

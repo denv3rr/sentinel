@@ -5,6 +5,7 @@ import datetime as dt
 from sentinel.pipeline.events import EventEngine
 from sentinel.storage.db import Database
 from sentinel.storage.repo import EventQuery, StorageRepo
+from sentinel.vision.detect_base import DetectionChild
 from sentinel.vision.track_base import TrackedObject
 
 
@@ -30,6 +31,41 @@ def test_event_dedupe_and_cooldown() -> None:
     assert len(first) == 1
     assert len(second) == 0
     assert len(third) == 1
+
+
+def test_event_serializes_child_boxes_in_metadata() -> None:
+    engine = EventEngine(global_thresholds={"person": 0.35, "animal": 0.30, "vehicle": 0.35, "unknown": 0.45})
+    camera_cfg = {
+        "id": "cam-1",
+        "name": "Front Door",
+        "labels": ["person", "vehicle", "animal", "unknown"],
+        "min_confidence": {"person": 0.4},
+        "cooldown_seconds": 5,
+        "motion_threshold": 0.01,
+        "zones": [],
+    }
+    track = TrackedObject(
+        track_id=11,
+        bbox=(10, 10, 120, 220),
+        confidence=0.92,
+        label="person",
+        children=[DetectionChild(bbox=(40, 70, 70, 120), confidence=0.66, label="limb", raw_label="limb")],
+    )
+
+    events = engine.evaluate(
+        camera_cfg,
+        [track],
+        motion_score=0.2,
+        wall_time_iso="2026-01-01T00:00:00+00:00",
+        local_time_iso="2025-12-31T19:00:00-05:00",
+        monotonic_ns=10_000_000_000,
+    )
+
+    assert len(events) == 1
+    metadata = events[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["children"][0]["label"] == "limb"
+    assert metadata["children"][0]["bbox"] == [40, 70, 70, 120]
 
 
 def test_event_query_filters(tmp_path) -> None:
@@ -82,6 +118,59 @@ def test_event_query_filters(tmp_path) -> None:
     r3 = repo.query_events(q3)
     assert len(r3) == 1
     assert r3[0]["id"] == "e3"
+
+
+def test_event_query_child_label_filter(tmp_path) -> None:
+    db = Database(tmp_path / "db" / "sentinel.db")
+    repo = StorageRepo(db)
+    repo.upsert_camera({"id": "cam-z", "name": "Z", "kind": "webcam", "source": "0", "enabled": True})
+
+    when = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc).isoformat()
+    repo.insert_event(
+        {
+            "id": "e-child-1",
+            "created_at": when,
+            "local_time": when,
+            "monotonic_ns": 1,
+            "camera_id": "cam-z",
+            "event_type": "motion_detection",
+            "label": "person",
+            "confidence": 0.95,
+            "track_id": 1,
+            "zone": None,
+            "motion": 0.12,
+            "thumbnail_path": None,
+            "clip_path": None,
+            "reviewed": False,
+            "exported": False,
+            "search_text": "cam-z person limb",
+            "metadata": {"children": [{"label": "limb", "bbox": [1, 2, 3, 4]}]},
+        }
+    )
+    repo.insert_event(
+        {
+            "id": "e-child-2",
+            "created_at": when,
+            "local_time": when,
+            "monotonic_ns": 2,
+            "camera_id": "cam-z",
+            "event_type": "motion_detection",
+            "label": "person",
+            "confidence": 0.92,
+            "track_id": 2,
+            "zone": None,
+            "motion": 0.10,
+            "thumbnail_path": None,
+            "clip_path": None,
+            "reviewed": False,
+            "exported": False,
+            "search_text": "cam-z person motion",
+            "metadata": {"children": [{"label": "motion", "bbox": [2, 3, 4, 5]}]},
+        }
+    )
+
+    rows = repo.query_events(EventQuery(camera_id="cam-z", child_label="limb"))
+    assert [item["id"] for item in rows] == ["e-child-1"]
 
 
 def test_insert_events_batch_persists_all_rows(tmp_path) -> None:

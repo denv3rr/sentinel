@@ -14,6 +14,10 @@ tmp/
 temp/
 *.tmp
 
+# ML experiment outputs
+artifacts/
+runs/
+
 # Python
 __pycache__/
 *.py[cod]

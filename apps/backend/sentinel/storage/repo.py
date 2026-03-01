@@ -17,6 +17,7 @@ class EventQuery:
     label: str | None = None
     min_confidence: float | None = None
     zone: str | None = None
+    child_label: str | None = None
     reviewed: bool | None = None
     exported: bool | None = None
     search: str | None = None
@@ -128,6 +129,9 @@ class StorageRepo:
         if query.zone:
             clauses.append("zone = ?")
             params.append(query.zone)
+        if query.child_label:
+            clauses.append("REPLACE(metadata_json, ' ', '') LIKE ?")
+            params.append(f'%\"label\":\"{query.child_label.strip().lower()}\"%')
         if query.reviewed is not None:
             clauses.append("reviewed = ?")
             params.append(int(query.reviewed))
@@ -183,6 +187,9 @@ class StorageRepo:
         if query.zone:
             clauses.append("zone = ?")
             params.append(query.zone)
+        if query.child_label:
+            clauses.append("REPLACE(metadata_json, ' ', '') LIKE ?")
+            params.append(f'%\"label\":\"{query.child_label.strip().lower()}\"%')
         if query.reviewed is not None:
             clauses.append("reviewed = ?")
             params.append(int(query.reviewed))

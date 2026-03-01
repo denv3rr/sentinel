@@ -17,6 +17,7 @@ from sentinel.camera.base import CameraSource
 from sentinel.camera.health import ReconnectState
 from sentinel.camera.opencv_cam import OpenCVCameraSource
 from sentinel.camera.rtsp import RTSPCameraSource
+from sentinel.modules.range_estimator import CalibrationPriors, RangeEstimator
 from sentinel.pipeline.events import EventEngine
 from sentinel.pipeline.recorder import MediaRecorder
 from sentinel.storage.repo import StorageRepo
@@ -24,7 +25,7 @@ from sentinel.util.logging import get_logger
 from sentinel.util.security import SecretStore, sanitize_rtsp_url, validate_camera_id
 from sentinel.util.time import monotonic_ns as monotonic_ns_now
 from sentinel.util.time import now_local_iso, now_utc_iso
-from sentinel.vision.detect_base import Detection
+from sentinel.vision.detect_base import Detection, DetectionChild
 from sentinel.vision.tracker_default import DefaultIoUTracker
 from sentinel.vision.yolo_ultralytics import create_default_detector
 
@@ -298,6 +299,26 @@ class CameraWorker:
             ry1 = max(0, min(max_y, ry1))
             rx2 = max(rx1 + 1, min(frame_width, rx2))
             ry2 = max(ry1 + 1, min(frame_height, ry2))
+            rescaled_children: list[DetectionChild] = []
+            for child in detection.children:
+                cx1, cy1, cx2, cy2 = child.bbox
+                rcx1 = int(round(cx1 * scale_x))
+                rcy1 = int(round(cy1 * scale_y))
+                rcx2 = int(round(cx2 * scale_x))
+                rcy2 = int(round(cy2 * scale_y))
+                rcx1 = max(0, min(max_x, rcx1))
+                rcy1 = max(0, min(max_y, rcy1))
+                rcx2 = max(rcx1 + 1, min(frame_width, rcx2))
+                rcy2 = max(rcy1 + 1, min(frame_height, rcy2))
+                rescaled_children.append(
+                    DetectionChild(
+                        bbox=(rcx1, rcy1, rcx2, rcy2),
+                        confidence=child.confidence,
+                        label=child.label,
+                        raw_label=child.raw_label,
+                        child_id=child.child_id,
+                    )
+                )
 
             rescaled.append(
                 Detection(
@@ -305,19 +326,320 @@ class CameraWorker:
                     confidence=detection.confidence,
                     label=detection.label,
                     raw_label=detection.raw_label,
+                    children=rescaled_children,
+                    appearance_signature=detection.appearance_signature,
                 )
             )
         return rescaled
 
     @staticmethod
-    def _annotate(frame: np.ndarray, tracks: list[Any]) -> np.ndarray:
+    def _compute_appearance_signature(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> tuple[float, ...] | None:
+        height, width = frame.shape[:2]
+        x1, y1, x2, y2 = bbox
+        x1 = max(0, min(width - 1, int(x1)))
+        y1 = max(0, min(height - 1, int(y1)))
+        x2 = max(x1 + 1, min(width, int(x2)))
+        y2 = max(y1 + 1, min(height, int(y2)))
+        patch = frame[y1:y2, x1:x2]
+        if patch.size == 0:
+            return None
+        if patch.shape[0] < 6 or patch.shape[1] < 6:
+            return None
+
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        hist_h = cv2.calcHist([hsv], [0], None, [8], [0, 180]).flatten()
+        hist_s = cv2.calcHist([hsv], [1], None, [8], [0, 256]).flatten()
+        hist_v = cv2.calcHist([hsv], [2], None, [8], [0, 256]).flatten()
+        signature = np.concatenate([hist_h, hist_s, hist_v]).astype(np.float32)
+        norm = float(np.linalg.norm(signature))
+        if norm <= 1e-6:
+            return None
+        signature /= norm
+        return tuple(float(value) for value in signature)
+
+    @staticmethod
+    def _attach_detection_appearance(frame: np.ndarray, detections: list[Detection]) -> list[Detection]:
+        for detection in detections:
+            detection.appearance_signature = CameraWorker._compute_appearance_signature(frame, detection.bbox)
+        return detections
+
+    @staticmethod
+    def _base_color_for_label(label: str) -> tuple[int, int, int]:
+        palette = {
+            "person": (24, 193, 145),
+            "animal": (60, 135, 250),
+            "vehicle": (66, 189, 255),
+            "unknown": (170, 170, 170),
+            "motion": (176, 118, 236),
+            "limb": (176, 118, 236),
+        }
+        return palette.get(str(label).lower(), (24, 193, 145))
+
+    @staticmethod
+    def _shade_color(color: tuple[int, int, int], factor: float = 0.25) -> tuple[int, int, int]:
+        # Positive factor lightens toward white; negative factor darkens toward black.
+        clamped = max(-1.0, min(1.0, factor))
+        if clamped >= 0.0:
+            return tuple(min(255, int(round(channel + ((255 - channel) * clamped)))) for channel in color)
+        return tuple(max(0, int(round(channel * (1.0 + clamped)))) for channel in color)
+
+    @staticmethod
+    def _annotate(frame: np.ndarray, tracks: list[Any], camera_cfg: dict[str, Any]) -> np.ndarray:
         out = frame.copy()
+        show_children = bool(camera_cfg.get("overlay_show_children", True))
+        parent_thickness = max(1, int(camera_cfg.get("overlay_parent_thickness", 2)))
+        child_thickness = max(1, int(camera_cfg.get("overlay_child_thickness", 1)))
+        shade_delta = float(camera_cfg.get("overlay_child_shade_delta", 0.30))
         for track in tracks:
+            parent_color = CameraWorker._base_color_for_label(getattr(track, "label", "unknown"))
             x1, y1, x2, y2 = track.bbox
-            cv2.rectangle(out, (x1, y1), (x2, y2), (24, 193, 145), 2)
+            cv2.rectangle(out, (x1, y1), (x2, y2), parent_color, parent_thickness)
             text = f"#{track.track_id} {track.label} {track.confidence:.2f}"
-            cv2.putText(out, text, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (24, 193, 145), 1)
+            cv2.putText(out, text, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, parent_color, 1)
+            if not show_children:
+                continue
+            child_color = CameraWorker._shade_color(parent_color, factor=shade_delta)
+            for child in getattr(track, "children", []):
+                cx1, cy1, cx2, cy2 = child.bbox
+                cv2.rectangle(out, (cx1, cy1), (cx2, cy2), child_color, child_thickness)
+                child_label = str(child.label or "child")
+                if child.child_id:
+                    child_label = f"{child_label}:{child.child_id}"
+                cv2.putText(
+                    out,
+                    f"{child_label} {child.confidence:.2f}",
+                    (cx1, max(14, cy1 - 3)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    child_color,
+                    1,
+                )
         return out
+
+    def _resolve_detector_profile(self) -> str:
+        manual_profile = str(self.camera_cfg.get("detector_profile", "balanced")).strip().lower() or "balanced"
+        auto_profile = bool(self.camera_cfg.get("detector_profile_auto", True))
+        if not auto_profile:
+            return manual_profile
+
+        source = str(self.camera_cfg.get("source", "")).lower()
+        name = str(self.camera_cfg.get("name", "")).lower()
+        if any(token in source or token in name for token in ("capture", "hdmi", "elgato", "obs")):
+            return "capture_card_reforger"
+
+        inference_max_side = int(self.camera_cfg.get("inference_max_side", 960))
+        if inference_max_side >= 1280:
+            return "small_object"
+
+        target_fps = float(self.camera_cfg.get("target_fps", 10.0))
+        motion_threshold = float(self.camera_cfg.get("motion_threshold", 0.012))
+        if target_fps >= 20.0 or motion_threshold <= 0.01:
+            return "fast_motion"
+
+        return manual_profile
+
+    def _build_detector(self) -> Any:
+        kwargs: dict[str, Any] = {
+            "model_name": self.model_name,
+            "confidence": float(self.camera_cfg.get("detector_confidence", 0.25)),
+            "profile": self._resolve_detector_profile(),
+            "child_attach_mode": str(self.camera_cfg.get("child_attach_mode", "balanced")),
+            "image_size": int(self.camera_cfg.get("detector_image_size", 960)),
+            "max_boxes": int(self.camera_cfg.get("detector_max_boxes", 80)),
+            "motion_threshold": int(self.camera_cfg.get("detector_motion_threshold", 28)),
+            "min_motion_area": int(self.camera_cfg.get("detector_min_motion_area", 900)),
+            "smoothing_alpha": float(self.camera_cfg.get("detector_smoothing_alpha", 0.42)),
+            "hysteresis_frames": int(self.camera_cfg.get("detector_hysteresis_frames", 2)),
+        }
+        try:
+            return create_default_detector(**kwargs)
+        except TypeError:
+            # Backward compatibility for monkeypatched tests that only accept model_name.
+            return create_default_detector(model_name=self.model_name)
+
+    @staticmethod
+    def _tracker_profile_defaults() -> dict[str, dict[str, float | int | bool]]:
+        return {
+            "balanced": {
+                "tracker_iou_threshold": 0.35,
+                "tracker_max_age": 18,
+                "tracker_memory_age": 45,
+                "tracker_reid_distance_scale": 2.4,
+                "tracker_min_size_similarity": 0.2,
+                "tracker_use_appearance": True,
+                "tracker_appearance_weight": 0.32,
+                "tracker_min_appearance_similarity": 0.14,
+                "tracker_appearance_ema_alpha": 0.55,
+            },
+            "fast_motion": {
+                "tracker_iou_threshold": 0.30,
+                "tracker_max_age": 24,
+                "tracker_memory_age": 72,
+                "tracker_reid_distance_scale": 3.3,
+                "tracker_min_size_similarity": 0.12,
+                "tracker_use_appearance": True,
+                "tracker_appearance_weight": 0.38,
+                "tracker_min_appearance_similarity": 0.10,
+                "tracker_appearance_ema_alpha": 0.60,
+            },
+            "small_object": {
+                "tracker_iou_threshold": 0.28,
+                "tracker_max_age": 26,
+                "tracker_memory_age": 80,
+                "tracker_reid_distance_scale": 3.2,
+                "tracker_min_size_similarity": 0.08,
+                "tracker_use_appearance": True,
+                "tracker_appearance_weight": 0.40,
+                "tracker_min_appearance_similarity": 0.08,
+                "tracker_appearance_ema_alpha": 0.58,
+            },
+            "capture_card_reforger": {
+                "tracker_iou_threshold": 0.26,
+                "tracker_max_age": 30,
+                "tracker_memory_age": 96,
+                "tracker_reid_distance_scale": 3.7,
+                "tracker_min_size_similarity": 0.08,
+                "tracker_use_appearance": True,
+                "tracker_appearance_weight": 0.44,
+                "tracker_min_appearance_similarity": 0.07,
+                "tracker_appearance_ema_alpha": 0.62,
+            },
+            "memory_strong": {
+                "tracker_iou_threshold": 0.22,
+                "tracker_max_age": 40,
+                "tracker_memory_age": 140,
+                "tracker_reid_distance_scale": 4.1,
+                "tracker_min_size_similarity": 0.05,
+                "tracker_use_appearance": True,
+                "tracker_appearance_weight": 0.50,
+                "tracker_min_appearance_similarity": 0.06,
+                "tracker_appearance_ema_alpha": 0.65,
+            },
+        }
+
+    @staticmethod
+    def _same_default(candidate: object, default: object) -> bool:
+        if isinstance(default, bool):
+            return bool(candidate) is default
+        if isinstance(default, int):
+            try:
+                return int(candidate) == default
+            except Exception:
+                return False
+        if isinstance(default, float):
+            try:
+                return abs(float(candidate) - default) <= 1e-9
+            except Exception:
+                return False
+        return candidate == default
+
+    def _resolve_tracker_profile(self) -> str:
+        manual_profile = str(self.camera_cfg.get("tracker_profile", "balanced")).strip().lower() or "balanced"
+        auto_profile = bool(self.camera_cfg.get("tracker_profile_auto", True))
+        if not auto_profile:
+            return manual_profile
+
+        detector_profile = self._resolve_detector_profile()
+        if detector_profile in {"balanced", "fast_motion", "small_object", "capture_card_reforger"}:
+            return detector_profile
+        return manual_profile
+
+    def _effective_tracker_config(self) -> dict[str, object]:
+        profiles = self._tracker_profile_defaults()
+        base_defaults = profiles["balanced"]
+        resolved_profile = self._resolve_tracker_profile()
+        profile_defaults = profiles.get(resolved_profile, base_defaults)
+        auto_profile = bool(self.camera_cfg.get("tracker_profile_auto", True))
+
+        effective: dict[str, object] = {}
+        for key, default_value in base_defaults.items():
+            candidate = self.camera_cfg.get(key, default_value)
+            # Apply profile defaults unless explicitly overridden away from balanced defaults.
+            if (auto_profile or resolved_profile != "balanced") and self._same_default(candidate, default_value):
+                candidate = profile_defaults.get(key, default_value)
+            effective[key] = candidate
+        return effective
+
+    def _build_tracker(self) -> DefaultIoUTracker:
+        effective = self._effective_tracker_config()
+        return DefaultIoUTracker(
+            iou_threshold=float(effective["tracker_iou_threshold"]),
+            max_age=int(effective["tracker_max_age"]),
+            memory_max_age=int(effective["tracker_memory_age"]),
+            reid_distance_scale=float(effective["tracker_reid_distance_scale"]),
+            min_size_similarity=float(effective["tracker_min_size_similarity"]),
+            use_appearance=bool(effective["tracker_use_appearance"]),
+            appearance_weight=float(effective["tracker_appearance_weight"]),
+            min_appearance_similarity=float(effective["tracker_min_appearance_similarity"]),
+            appearance_ema_alpha=float(effective["tracker_appearance_ema_alpha"]),
+        )
+
+    def _build_range_estimator(self) -> RangeEstimator:
+        mode = str(self.camera_cfg.get("range_mode", "relative_depth"))
+        calibration_payload: dict[str, object] = {}
+        direct = self.camera_cfg.get("range_calibration")
+        if isinstance(direct, dict):
+            calibration_payload = dict(direct)
+        presets = self.camera_cfg.get("range_calibration_presets")
+        preset_name = self.camera_cfg.get("range_calibration_preset")
+        if isinstance(presets, dict) and isinstance(preset_name, str) and preset_name:
+            preset = presets.get(preset_name)
+            if isinstance(preset, dict):
+                calibration_payload = dict(preset)
+
+        calibration: CalibrationPriors | None = None
+        try:
+            focal = float(calibration_payload.get("focal_length_px", 0.0))
+            target_h = float(calibration_payload.get("target_height_m", 0.0))
+            tilt = float(calibration_payload.get("camera_tilt_deg", 0.0))
+            if focal > 0.0 and target_h > 0.0:
+                calibration = CalibrationPriors(focal_length_px=focal, target_height_m=target_h, camera_tilt_deg=tilt)
+        except Exception:
+            calibration = None
+
+        return RangeEstimator(mode=mode, calibration=calibration)
+
+    def _hierarchy_debug_path(self) -> Path:
+        base = self.data_dir / "debug" / "hierarchy"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"{self.camera_cfg.get('id', 'camera')}.jsonl"
+
+    def _write_hierarchy_debug(
+        self,
+        *,
+        path: Path,
+        wall_time_iso: str,
+        motion: float,
+        tracks: list[Any],
+        frame_shape: tuple[int, ...],
+    ) -> None:
+        payload = {
+            "time": wall_time_iso,
+            "camera_id": str(self.camera_cfg.get("id")),
+            "motion": round(float(motion), 6),
+            "frame_shape": list(frame_shape),
+            "tracks": [
+                {
+                    "track_id": int(track.track_id),
+                    "label": str(track.label),
+                    "confidence": round(float(track.confidence), 4),
+                    "bbox": list(track.bbox),
+                    "children": [
+                        {
+                            "child_id": child.child_id,
+                            "label": str(child.label),
+                            "raw_label": child.raw_label,
+                            "confidence": round(float(child.confidence), 4),
+                            "bbox": list(child.bbox),
+                        }
+                        for child in getattr(track, "children", [])
+                    ],
+                }
+                for track in tracks
+            ],
+        }
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
     def _run_loop(self) -> None:
         source: CameraSource | None = None
@@ -348,6 +670,9 @@ class CameraWorker:
         continuous_start_wall_iso: str | None = None
 
         prev_gray: np.ndarray | None = None
+        range_estimator = self._build_range_estimator()
+        hierarchy_debug_export = bool(self.camera_cfg.get("hierarchy_debug_export", False))
+        hierarchy_debug_path = self._hierarchy_debug_path() if hierarchy_debug_export else None
         frame_counter = 0
         fps_window_start = time.perf_counter()
         current_fps = 0.0
@@ -471,9 +796,9 @@ class CameraWorker:
 
                         if detector_enabled and is_armed:
                             if detector is None:
-                                detector = create_default_detector(model_name=self.model_name)
+                                detector = self._build_detector()
                             if tracker is None:
-                                tracker = DefaultIoUTracker()
+                                tracker = self._build_tracker()
                             inference_started = time.perf_counter()
                             inference_frame, scale_x, scale_y = self._prepare_inference_frame(frame, inference_max_side)
                             prev_gray, motion = self._motion_score(prev_gray, inference_frame)
@@ -481,7 +806,24 @@ class CameraWorker:
                             if scale_x != 1.0 or scale_y != 1.0:
                                 frame_height, frame_width = frame.shape[:2]
                                 detections = self._rescale_detections(detections, scale_x, scale_y, frame_width, frame_height)
+                            if bool(self.camera_cfg.get("tracker_use_appearance", True)):
+                                detections = self._attach_detection_appearance(frame, detections)
                             tracked = tracker.update(detections)
+                            range_by_track: dict[int, dict[str, object]] = {}
+                            for track in tracked:
+                                range_est = range_estimator.estimate(
+                                    track_id=track.track_id,
+                                    bbox=track.bbox,
+                                    frame_shape=frame.shape,
+                                )
+                                range_by_track[int(track.track_id)] = {
+                                    "depth_rel": range_est.depth_rel,
+                                    "range_est_m": range_est.range_est_m,
+                                    "range_sigma_m": range_est.range_sigma_m,
+                                    "method": range_est.method,
+                                    "calibrated": range_est.calibrated,
+                                    "provenance": range_est.provenance,
+                                }
                             emitted = events.evaluate(
                                 self.camera_cfg,
                                 tracked,
@@ -490,9 +832,29 @@ class CameraWorker:
                                 packet.local_time_iso,
                                 packet.monotonic_ns,
                             )
+                            for event in emitted:
+                                metadata = event.setdefault("metadata", {})
+                                if not isinstance(metadata, dict):
+                                    metadata = {}
+                                    event["metadata"] = metadata
+                                track_id = event.get("track_id")
+                                if isinstance(track_id, int) and track_id in range_by_track:
+                                    metadata["range"] = range_by_track[track_id]
                             inference_ms = (time.perf_counter() - inference_started) * 1000.0
                         else:
                             prev_gray = None
+
+                        if hierarchy_debug_path is not None and tracked:
+                            try:
+                                self._write_hierarchy_debug(
+                                    path=hierarchy_debug_path,
+                                    wall_time_iso=packet.wall_time_iso,
+                                    motion=motion,
+                                    tracks=tracked,
+                                    frame_shape=frame.shape,
+                                )
+                            except Exception:
+                                logger.debug("failed to write hierarchy debug row: %s", camera_id, exc_info=True)
 
                         if emitted:
                             clip_frames = list(clip_buffer)
@@ -561,7 +923,7 @@ class CameraWorker:
 
                         if self._has_stream_subscribers():
                             encode_started = time.perf_counter()
-                            annotated = self._annotate(frame, tracked)
+                            annotated = self._annotate(frame, tracked, self.camera_cfg)
                             if not is_armed:
                                 cv2.putText(
                                     annotated,
